@@ -1,0 +1,24 @@
+# Mosquitto bridge: forward battery topics from THIS Pi's broker to a remote
+# Home Assistant Mosquitto broker, so HA's MQTT integration auto-discovers them.
+#
+# Install to /etc/mosquitto/conf.d/ha-bridge.conf  (chown root:root, chmod 640)
+# then: sudo systemctl restart mosquitto
+#
+# Only needed if HA runs its OWN broker (Mosquitto add-on). If instead you point
+# HA's MQTT integration directly at this Pi's broker, you do NOT need this file.
+
+connection ha-bridge
+address REMOTE_HA_IP:1883
+remote_clientid pi-bms-bridge
+# Credentials of an MQTT user on the HA broker (a HA login works on the add-on).
+# Leave both commented out if the HA broker allows anonymous connections.
+remote_username REPLACE_MQTT_USER
+remote_password REPLACE_MQTT_PASSWORD
+bridge_protocol_version mqttv311
+cleansession true
+notifications false
+try_private false
+restart_timeout 10
+# Direction "out" = publish local topics to the remote HA broker.
+topic bms/# out 0
+topic homeassistant/# out 0

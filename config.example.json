@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to config.json and fill in your battery MACs (see README: 'Find your batteries'). The advertised name is usually the battery serial; use it to match each MAC to a physical pack.",
+  "mqtt": {
+    "host": "127.0.0.1",
+    "port": 1883,
+    "username": null,
+    "password": null,
+    "base_topic": "bms",
+    "discovery_prefix": "homeassistant"
+  },
+  "poll": {
+    "cycle_seconds": 90,
+    "connect_timeout": 12,
+    "settle_seconds": 2.0,
+    "notify_timeout": 8,
+    "find_timeout": 8,
+    "attempts": 3,
+    "retry_seconds": 3,
+    "gap_seconds": 1.5
+  },
+  "batteries": [
+    { "mac": "AA:BB:CC:00:00:01", "name": "Battery 1", "serial": "REPLACE-ME-001" },
+    { "mac": "AA:BB:CC:00:00:02", "name": "Battery 2", "serial": "REPLACE-ME-002" }
+  ]
+}

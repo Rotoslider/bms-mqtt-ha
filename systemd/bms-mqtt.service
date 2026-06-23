@@ -1,0 +1,18 @@
+[Unit]
+Description=JBD BMS BLE to MQTT bridge (Vatrer batteries -> Home Assistant)
+After=bluetooth.target mosquitto.service network-online.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=solar-assistant
+Group=solar-assistant
+ExecStart=/usr/bin/python3 /opt/bms-mqtt/bms_mqtt.py
+WorkingDirectory=/opt/bms-mqtt
+Restart=always
+RestartSec=15
+# Give BlueZ a moment after boot before first scan
+ExecStartPre=/bin/sleep 10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Secrets / machine-specific — never commit
+.ha_token
+ha.env
+config.json
+ha-bridge.conf
+*.local.json
+__pycache__/
+*.pyc
