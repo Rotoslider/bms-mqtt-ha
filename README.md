@@ -18,7 +18,20 @@ voltage. Monitoring works on its own; the closed loop is opt-in — see
 ![Home Assistant overview: per-pack cell-delta, SOC and temperature at a glance](images/HA_BMS_Overview.png)
 
 *The auto-generated "Batteries" dashboard — all 8 packs at a glance. Cell delta is the
-imbalance number to watch (Battery 2 at 140 mV stands out here).*
+imbalance number to watch (Battery 2 at 140 mV stands out here, **before** the closed
+loop).*
+
+**After the closed loop ran overnight**, the inverter throttling charge on the
+weakest cell pulled the packs into line — Battery 2's imbalance fell from 140 mV to
+just a few mV, and every pack is now in single digits:
+
+![Cell-delta imbalance watch after balancing — every pack 1–6 mV](images/after_balance.png)
+
+![24-hour per-cell voltages — all 16 cells per pack converged and tracking tightly together](images/balancing.png)
+
+*Same dashboard, the morning after. The per-cell graphs start spread apart and squeeze
+together as the weak cells catch up, then track as one line. This is what closing the
+loop buys you — see [docs/CLOSED-LOOP.md](docs/CLOSED-LOOP.md).*
 
 ---
 
