@@ -429,4 +429,5 @@ How it fits together:
   ÷100 → A, temps `(raw − 2731)/10` → °C, cells are big-endian mV.
 - Built with [bleak](https://github.com/hbldh/bleak) and
   [paho-mqtt](https://www.eclipse.org/paho/). Inspired by the many community JBD/Overkill
-  Solar BMS tools. MIT licensed (see `LICENSE`).
+  Solar BMS tools. Released into the **public domain** (The Unlicense) — use it
+  however you like, no restrictions (see `LICENSE`).
