@@ -139,6 +139,17 @@ protocols and are **not** decoded here — see "BMS_BLE-HA" or "batmon-ha" for t
 > [Configuration reference](#configuration-reference). The pack `serial` is appended to
 > the model automatically.
 
+### 24 V / 36 V (and other cell counts) — no code changes
+The cell count is read **live from each BMS**, not assumed, so **8S (24 V), 12S (36 V),
+16S (48 V)** and anything else "just work" for monitoring. Each pack reports its own cell
+count and HA creates exactly that many cell sensors automatically — an 8S pack gets 8, a
+12S gets 12. You can even mix different-voltage packs on the **same dashboard** at the
+same time; just add each one to the `batteries` list. Nothing to edit, no per-cell config.
+
+> Only the optional **closed-loop** stage cares about pack voltage (it sends a pack-level
+> charge/discharge limit to the inverter). Two numbers change there — see
+> [Closing the loop → different pack voltages](#closing-the-loop-to-the-inverter-optional).
+
 ---
 
 ## Prerequisites
@@ -418,6 +429,24 @@ How it fits together:
 👉 **Full from-scratch guide: [docs/CLOSED-LOOP.md](docs/CLOSED-LOOP.md)**
 (hardware, udev, dry-run, cutover, revert, safety, tuning). Plain-English version:
 [docs/closed-loop-explained.txt](docs/closed-loop-explained.txt).
+
+### Different pack voltages (24 V / 36 V / other cell counts)
+The emulator's charge/discharge brain runs off **per-cell millivolts** and SOC, which are
+identical for any LiFePO4 series count — so all the `cell_*_mv` thresholds stay the same.
+Only the **two pack-level voltage limits** scale with the number of cells in series (N):
+
+| Key | 16S (48 V) | 12S (36 V) | 8S (24 V) | Rule |
+|---|---|---|---|---|
+| `cvl_volts` (charge ceiling) | 55.2 | 41.4 | 27.6 | ≈ 3.45 V × N |
+| `dvl_volts` (discharge floor) | 48.0 | 36.0 | 24.0 | ≈ 3.00 V × N |
+
+Set them from **your** battery's datasheet. Current limits (`ccl_max_amps` /
+`dcl_max_amps`) are in amps and don't change with voltage.
+
+> ⚠️ One emulator instance feeds **one voltage class**: it averages pack voltage and sums
+> current, which is only valid for packs of the **same** cell count wired in parallel
+> (you can't parallel a 24 V and a 48 V battery). Mixed-voltage banks go to separate
+> inverters — run one emulator instance per bank, each on its own RS485 port and config.
 
 ---
 
