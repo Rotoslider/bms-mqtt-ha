@@ -114,10 +114,11 @@ OEM'd inside many LiFePO4 brands incl. Vatrer). Identify yours:
 Other BMS families (JK/JIKONG `ffe0`, Daly, Seplos, Pylontech…) use different
 protocols and are **not** decoded here — see "BMS_BLE-HA" or "batmon-ha" for those.
 
-> Cosmetic note: the HA device is labelled **"Vatrer / 51.2 V 100 Ah"** in the
-> discovery payload regardless of your actual brand (it's hard-coded in
-> `bms_mqtt.py`). The data is correct; just rename the device in HA, or edit the
-> `manufacturer`/`model` strings in `publish_discovery()` if it bothers you.
+> Brand label: the HA device shows a **manufacturer / model** that defaults to
+> "Vatrer / 51.2 V 100 Ah (JBD BMS)". Set your own with `device_defaults` (applies to
+> every pack) and/or a per-battery `manufacturer`/`model` in `config.json` — see
+> [Configuration reference](#configuration-reference). The pack `serial` is appended to
+> the model automatically.
 
 ---
 
@@ -308,7 +309,8 @@ Thresholds are env-overridable: `DELTA_MV`, `CELL_MIN_MV`, `CELL_MAX_MV`, `OFFLI
 | `poll.find_timeout` | per-pack BLE discovery timeout before connecting |
 | `poll.attempts` / `retry_seconds` | retries per pack and the gap between them |
 | `poll.gap_seconds` | pause between packs (helps the single radio settle) |
-| `batteries[]` | `mac`, `name`, `serial` for each pack |
+| `device_defaults.manufacturer` / `model` | *(optional)* HA device brand/model for all packs; defaults to `Vatrer` / `51.2V 100Ah (JBD BMS)` |
+| `batteries[]` | per pack: `mac`, `name`, `serial`, and optional `manufacturer` / `model` to override `device_defaults` for that pack |
 
 ---
 

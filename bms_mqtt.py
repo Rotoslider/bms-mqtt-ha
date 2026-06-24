@@ -225,11 +225,20 @@ def publish_discovery(client, cfg, batt, num_cells):
     base = cfg["mqtt"]["base_topic"]
     disc = cfg["mqtt"]["discovery_prefix"]
     bid = batt["bid"]
+    # manufacturer/model shown on the HA device page. Resolve per-battery override,
+    # then a global default in config, then the tested-hardware fallback.
+    defaults = cfg.get("device_defaults", {})
+    manufacturer = batt.get("manufacturer") or defaults.get("manufacturer") or "Vatrer"
+    model = batt.get("model") or defaults.get("model") or "51.2V 100Ah (JBD BMS)"
+    serial = batt.get("serial", "")
+    # NOTE: the "vatrer_" id prefix is an opaque, non-user-visible unique_id namespace.
+    # It stays constant on purpose so existing HA devices aren't orphaned/duplicated
+    # when manufacturer/model change — it is NOT the displayed brand.
     device = {
         "identifiers": [f"vatrer_{bid}"],
         "name": batt["name"],
-        "manufacturer": "Vatrer",
-        "model": f"51.2V 100Ah (JBD BMS) {batt.get('serial', '')}".strip(),
+        "manufacturer": manufacturer,
+        "model": f"{model} {serial}".strip(),
     }
     state_topic = f"{base}/{bid}/state"
     avail = [

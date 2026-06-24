@@ -18,8 +18,13 @@
     "retry_seconds": 3,
     "gap_seconds": 1.5
   },
+  "_device_defaults_comment": "manufacturer/model shown on the HA device page. Applied to every pack unless a battery overrides 'manufacturer'/'model' itself. The pack serial is appended to model automatically. Whole section is optional.",
+  "device_defaults": {
+    "manufacturer": "Vatrer",
+    "model": "51.2V 100Ah (JBD BMS)"
+  },
   "batteries": [
     { "mac": "AA:BB:CC:00:00:01", "name": "Battery 1", "serial": "REPLACE-ME-001" },
-    { "mac": "AA:BB:CC:00:00:02", "name": "Battery 2", "serial": "REPLACE-ME-002" }
+    { "mac": "AA:BB:CC:00:00:02", "name": "Battery 2", "serial": "REPLACE-ME-002", "manufacturer": "LiTime", "model": "12V 100Ah" }
   ]
 }
