@@ -23,6 +23,32 @@
     "manufacturer": "Vatrer",
     "model": "51.2V 100Ah (JBD BMS)"
   },
+  "_emulator_comment": "OPTIONAL closed-loop (Goal 3). Used ONLY by pylon_emulator.py, never by the bridge. The emulator presents all packs as ONE virtual Pylontech battery to a Sungold/SRNE inverter set to BMS protocol PYL. *** SET EVERY VOLTAGE/CURRENT/TEMP BELOW TO YOUR OWN BATTERY DATASHEET. *** Values here are the tested Vatrer 51.2V 100Ah numbers and are intentionally conservative. 'listen_only': true is a safe dry-run (logs what it WOULD send, transmits nothing) — keep it true until you have read docs/CLOSED-LOOP.md and verified wiring. Omit this whole section if you only want monitoring.",
+  "emulator": {
+    "serial_port": "/dev/rs485-bms",
+    "baud": 9600,
+    "listen_only": true,
+    "freshness_seconds": 300,
+    "min_fresh_batteries": 1,
+    "cells": 16,
+    "cvl_volts": 55.2,
+    "dvl_volts": 48.0,
+    "ccl_max_amps": 50.0,
+    "dcl_max_amps": 100.0,
+    "ccl_min_amps": 5.0,
+    "dcl_min_amps": 5.0,
+    "cell_chg_taper_start_mv": 3480,
+    "cell_chg_taper_end_mv": 3550,
+    "cell_overvolt_mv": 3600,
+    "cell_dis_taper_start_mv": 3050,
+    "cell_dis_taper_end_mv": 2900,
+    "cell_undervolt_mv": 2800,
+    "charge_temp_min_c": 0,
+    "charge_temp_max_c": 50,
+    "discharge_temp_min_c": -10,
+    "discharge_temp_max_c": 55,
+    "force_charge_soc": 5
+  },
   "batteries": [
     { "mac": "AA:BB:CC:00:00:01", "name": "Battery 1", "serial": "REPLACE-ME-001" },
     { "mac": "AA:BB:CC:00:00:02", "name": "Battery 2", "serial": "REPLACE-ME-002", "manufacturer": "LiTime", "model": "12V 100Ah" }

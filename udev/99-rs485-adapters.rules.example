@@ -1,0 +1,23 @@
+# Stable, predictable names for TWO USB-to-RS485 adapters, keyed by each
+# adapter's built-in serial number — so the emulator and Solar Assistant never
+# get swapped if the kernel renames /dev/ttyUSB0 <-> /dev/ttyUSB1 on reboot.
+#
+# /dev/rs485-inverter -> the adapter your monitor (e.g. Solar Assistant) already uses
+# /dev/rs485-bms      -> the NEW adapter wired to the inverter's BMS/RS485-2 port
+#
+# ---- FIND YOUR ADAPTERS' SERIALS ----------------------------------------
+# Plug in ONE adapter, then:
+#     for d in /dev/ttyUSB*; do
+#       echo "$d -> $(udevadm info -q property -n "$d" | grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT')"
+#     done
+# Most FTDI adapters report idVendor=0403 idProduct=6001 and a unique serial
+# like "BG01XXXX". CH340-based adapters often have NO unique serial — if so,
+# key on KERNELS (USB port path) instead; see the Arch/Debian udev docs.
+#
+# Replace the two serials below with YOUR values, then install:
+#     sudo cp udev/99-rs485-adapters.rules.example /etc/udev/rules.d/99-rs485-adapters.rules
+#     sudo udevadm control --reload-rules && sudo udevadm trigger
+#     ls -l /dev/rs485-*        # both symlinks should appear
+# -------------------------------------------------------------------------
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="REPLACE-INVERTER-SERIAL", SYMLINK+="rs485-inverter"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="REPLACE-BMS-SERIAL", SYMLINK+="rs485-bms"

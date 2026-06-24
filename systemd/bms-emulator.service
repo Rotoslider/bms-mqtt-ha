@@ -1,0 +1,16 @@
+[Unit]
+Description=Pylontech RS485 battery emulator -> Sungold/SRNE inverter (closed loop)
+After=bms-mqtt.service mosquitto.service
+Wants=bms-mqtt.service
+
+[Service]
+Type=simple
+User=solar-assistant
+Group=solar-assistant
+ExecStart=/usr/bin/python3 /opt/bms-mqtt/pylon_emulator.py
+WorkingDirectory=/opt/bms-mqtt
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

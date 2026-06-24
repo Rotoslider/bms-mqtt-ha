@@ -9,6 +9,12 @@ Built and tested on a Raspberry Pi 4 monitoring **8× Vatrer 51.2 V 100 Ah** pac
 (16 cells each) behind a Sungold SPH5048P inverter, running on the **Solar Assistant**
 appliance image — but it works on a plain Raspberry Pi OS install too.
 
+There's also an **optional closed-loop stage** (`pylon_emulator.py`): present all
+your packs to a Sungold/SRNE-class inverter as one virtual **Pylontech** battery
+over RS485, so it charges from real cell data instead of guessing SOC from
+voltage. Monitoring works on its own; the closed loop is opt-in — see
+**[docs/CLOSED-LOOP.md](docs/CLOSED-LOOP.md)**.
+
 ![Home Assistant overview: per-pack cell-delta, SOC and temperature at a glance](images/HA_BMS_Overview.png)
 
 *The auto-generated "Batteries" dashboard — all 8 packs at a glance. Cell delta is the
@@ -34,7 +40,7 @@ imbalance number to watch (Battery 2 at 140 mV stands out here).*
 11. [Troubleshooting](#troubleshooting)
 12. [Security notes](#security-notes)
 13. [Files in this repo](#files-in-this-repo)
-14. [Roadmap — closing the loop to the inverter](#roadmap--closing-the-loop-to-the-inverter)
+14. [Closing the loop to the inverter (optional)](#closing-the-loop-to-the-inverter-optional)
 15. [Protocol reference & credits](#protocol-reference--credits)
 
 ---
@@ -191,7 +197,7 @@ so you can match a MAC to a physical pack (the serial usually matches the label 
 the vendor app). Example:
 ```json
 "batteries": [
-  { "mac": "A4:C1:37:11:22:33", "name": "Battery 1", "serial": "DXDC00203J-039" }
+  { "mac": "A4:C1:37:11:22:33", "name": "Battery 1", "serial": "REPLACE-ME-001" }
 ]
 ```
 
@@ -311,6 +317,7 @@ Thresholds are env-overridable: `DELTA_MV`, `CELL_MIN_MV`, `CELL_MAX_MV`, `OFFLI
 | `poll.gap_seconds` | pause between packs (helps the single radio settle) |
 | `device_defaults.manufacturer` / `model` | *(optional)* HA device brand/model for all packs; defaults to `Vatrer` / `51.2V 100Ah (JBD BMS)` |
 | `batteries[]` | per pack: `mac`, `name`, `serial`, and optional `manufacturer` / `model` to override `device_defaults` for that pack |
+| `emulator` | *(optional)* closed-loop settings used only by `pylon_emulator.py` — every key is documented in **[docs/CLOSED-LOOP.md](docs/CLOSED-LOOP.md)**. Leave it out for monitoring-only. |
 
 ---
 
@@ -353,30 +360,51 @@ Thresholds are env-overridable: `DELTA_MV`, `CELL_MIN_MV`, `CELL_MAX_MV`, `OFFLI
 | File | Purpose |
 |---|---|
 | `bms_mqtt.py` | the bridge service (BLE → MQTT, HA discovery) |
-| `config.example.json` | copy to `config.json` and fill in your packs |
-| `systemd/bms-mqtt.service` | systemd unit |
+| `config.example.json` | copy to `config.json` and fill in your packs (and, optionally, the `emulator` block) |
+| `systemd/bms-mqtt.service` | systemd unit for the bridge |
 | `mosquitto/ha-bridge.conf.example` | optional Pi→HA broker bridge (Option B) |
 | `homeassistant/ha_dashboard.py` | build the "Batteries" dashboard via HA WS API |
 | `homeassistant/ha_automations.py` | create the alert automations via HA REST API |
 | `images/` | dashboard screenshots used in this README |
 | `.gitignore` | keeps secrets / machine-specific files out of git |
+| **Closed loop (optional):** | |
+| `pylon_emulator.py` | presents all packs as one virtual Pylontech battery to the inverter over RS485 (`--selftest` to validate the codec) |
+| `systemd/bms-emulator.service` | systemd unit for the emulator |
+| `udev/99-rs485-adapters.rules.example` | stable `/dev/rs485-*` names for the two USB-RS485 adapters |
+| `docs/CLOSED-LOOP.md` | full from-scratch closed-loop guide (wiring, dry-run, cutover, revert, safety) |
+| `docs/closed-loop-explained.txt` | plain-English, non-technical explainer |
 
 Not included (secrets / machine-specific): `config.json`, `ha-bridge.conf`,
 `.ha_token`.
 
 ---
 
-## Roadmap — closing the loop to the inverter
-The monitoring above is read-only. The next phase (in progress) is feeding aggregated
-pack data back to the inverter so it can charge intelligently from the **weakest cell**:
-- Many all-in-one inverters (Sungold, Growatt, etc.) accept a closed-loop BMS over
-  **RS485 or CAN**. The tested Sungold SPH5048P is **RS485-only**.
-- Plan: a USB-to-RS485 adapter on the inverter's battery-comms port, with the Pi
-  emulating a single virtual battery (e.g. the **Pylontech RS485** profile) and sending
-  charge-voltage / charge-current / discharge-current limits derived from the worst
-  cell and temperature across all packs.
-- ⚠️ This is the risky part: wrong limits can over/under-charge the pack. Confirm the
-  exact protocol your inverter accepts and test carefully before relying on it.
+## Closing the loop to the inverter (optional)
+The monitoring above is read-only. The optional second stage feeds aggregated pack
+data back to the inverter so it charges from the **weakest cell** instead of guessing
+SOC from voltage. It's implemented and running on the tested rig — `pylon_emulator.py`
+presents all 8 packs to the Sungold SPH5048P as one virtual **Pylontech (PYL)** battery
+over a second USB-RS485 adapter.
+
+How it fits together:
+```
+  bms_mqtt.py ──MQTT──▶ pylon_emulator.py ──RS485 (PYL)──▶ inverter
+   (reads BLE)            • avg V, sum A, worst cell/temp     (charges on
+                          • derives CVL/CCL/DVL/DCL limits     real cell data)
+```
+- Many all-in-one inverters (Sungold, Growatt, SRNE, etc.) accept a closed-loop BMS
+  over **RS485 or CAN**. The tested Sungold SPH5048P is **RS485-only**.
+- The emulator throttles charge/discharge on the worst cell and temperature, **stops
+  answering** if pack data goes stale (inverter falls back to its own settings), and
+  is **read-only toward the batteries**. One-line revert: set the inverter's RS485 port
+  back to plain `485`.
+- ⚠️ This stage changes how an expensive bank is charged. Set every limit from **your**
+  battery's datasheet, use the built-in `listen_only` dry-run, and go live when a brief
+  power blip is acceptable.
+
+👉 **Full from-scratch guide: [docs/CLOSED-LOOP.md](docs/CLOSED-LOOP.md)**
+(hardware, udev, dry-run, cutover, revert, safety, tuning). Plain-English version:
+[docs/closed-loop-explained.txt](docs/closed-loop-explained.txt).
 
 ---
 

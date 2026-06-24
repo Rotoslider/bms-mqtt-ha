@@ -1,0 +1,63 @@
+Closed-loop battery comms on my shop solar setup — what I did and why
+
+The setup
+I run the shop off a Sungold SPH5048P (it's an SRNE board under the hood), with
+8 Vatrer 51.2V 100Ah rack batteries in parallel and a string of panels. Each
+battery has its own BMS, but they were running dumb — no communication to the
+inverter. The inverter was estimating state of charge from voltage alone, and
+with lithium that barely works. The number would look fine, then the moment
+charging stopped it'd fall off a cliff — like 40% gone in a few minutes —
+because lithium voltage sags as soon as you quit pushing current in. The pack
+wasn't actually draining, the inverter was just guessing badly.
+
+The idea
+The batteries do talk over Bluetooth (that's what the Vatrer phone app reads).
+So instead of buying anything, I read every cell from all 8 packs over
+Bluetooth and feed that back into the inverter as if it were one big smart
+battery. Now the inverter charges based on what the cells are really doing
+instead of guessing from voltage. People kept telling me "closed loop is the
+way," so that's what this is.
+
+How it's put together
+A Raspberry Pi does the work — the same one already running Solar Assistant for
+monitoring. It connects to each battery over Bluetooth, one at a time, and pulls
+voltage, current, temperature, state of charge, and all 16 cell voltages.
+
+The inverter talks to batteries over RS485 using the Pylontech protocol, which
+is one of the battery types it already supports. So I put a second USB-to-RS485
+adapter on the Pi, wired into the inverter's battery-comms port, and the Pi
+pretends to be a Pylontech battery. The inverter asks it for data a few times a
+second and the Pi answers with the combined numbers from all 8 packs.
+
+What the Pi actually tells the inverter
+It boils the 8 packs down to one virtual battery — averages the voltage, adds up
+the current, and then looks at the single worst cell and worst temperature
+across all 128 cells. From that it decides the charge limits it hands the
+inverter: target voltage 55.2V, up to 50A charge. As the highest cell climbs
+past about 3.48V it tells the inverter to ease the charge current down, and it
+cuts charging off entirely if any cell reaches 3.60V — which is still below the
+battery's own protection trip at 3.75V. Same idea in reverse for a low cell on
+discharge. The whole point is the inverter throttles on the weakest cell, so the
+strong cells never get shoved too hard while the weak ones catch up. Two of my
+packs are a bit out of balance, so this matters.
+
+Keeping it safe
+- If the Pi's battery data goes stale, it stops answering on purpose. The
+  inverter then falls back to its old voltage-based settings instead of acting
+  on bad numbers.
+- One-button undo: set the inverter's comms port back to "485" and it's back to
+  exactly how it ran before.
+- The limits are deliberately conservative, and the Pi only reads from the
+  batteries — it never writes any settings to them.
+- The monitoring link to Solar Assistant is a completely separate port, so this
+  didn't disturb it.
+
+What I'm still chewing on (want your take)
+State of charge now comes from the BMS amp-hour counters, averaged across the 8
+packs, instead of from voltage. That's a big step up, but those counters only
+stay honest if the bank charges all the way full now and then to re-zero. Some
+people say I should add a shunt for one accurate bank-level SOC number. Do you
+think the BMS average is good enough, or is the shunt worth it? And does the
+charge-taper plan (ease off at 3.48V, stop at 3.60V) sound about right to you,
+or too cautious? First real test is watching how the SOC drops overnight on just
+the standby load.
