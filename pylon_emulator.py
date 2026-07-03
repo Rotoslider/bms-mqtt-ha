@@ -107,9 +107,18 @@ class Aggregator:
         cyc = vals("cycles", 0)
         rem = vals("remaining_ah", 0); nom = vals("nominal_ah", 0)
         problems = [p.get("problem") == "ON" for p in packs]
-        # a pack whose BMS opened its charge/discharge FET => that path is blocked
-        chg_fets = [p.get("fet_charge", "ON") == "ON" for p in packs]
-        dis_fets = [p.get("fet_discharge", "ON") == "ON" for p in packs]
+        # Per-pack charge/discharge capability, straight from each BMS's own FET state.
+        # A pack whose BMS opened its charge FET has finished or is protecting itself:
+        # it drops out of the charge circuit, but the REST of the bank keeps charging.
+        # The bank is only truly "blocked" when NO pack can accept charge anymore. This
+        # is what lets a leader pack top out and coast at ~0 A while the laggards keep
+        # filling, instead of the first full pack vetoing charge for all eight.
+        chg_caps = [p for p in packs if p.get("fet_charge", "ON") == "ON"]
+        dis_caps = [p for p in packs if p.get("fet_discharge", "ON") == "ON"]
+
+        def worst(pack_list, key, agg):
+            xs = [p[key] for p in pack_list if p.get(key) is not None]
+            return agg(xs) if xs else None
 
         if not (v and cur and soc and cmax and cmin and tmax and tmin):
             return None
@@ -118,8 +127,10 @@ class Aggregator:
             "voltage": sum(v) / len(v),
             "current": sum(cur),                      # parallel banks add
             "soc": round(sum(soc) / len(soc)),
-            "cell_max_mv": max(cmax),
-            "cell_min_mv": min(cmin),
+            "cell_max_mv": max(cmax),                 # true worst cell across ALL packs
+            "cell_min_mv": min(cmin),                 #   (reported to inverter + hard safety)
+            "cell_max_chg_mv": worst(chg_caps, "cell_max_mv", max),  # worst cell still charging
+            "cell_min_dis_mv": worst(dis_caps, "cell_min_mv", min),  # worst cell still discharging
             "temp_max": max(tmax),
             "temp_min": min(tmin),
             "temp_avg": sum(temps) / len(temps),
@@ -127,9 +138,11 @@ class Aggregator:
             "remaining_ah": sum(rem),
             "nominal_ah": sum(nom),
             "n_fresh": len(packs),
-            "any_problem": any(problems),
-            "charge_blocked": not all(chg_fets),
-            "discharge_blocked": not all(dis_fets),
+            "n_charge_capable": len(chg_caps),
+            "n_discharge_capable": len(dis_caps),
+            "any_problem": any(problems),             # surfaced as an alarm, not a bank-wide stop
+            "charge_blocked": len(chg_caps) == 0,     # blocked only when NO pack can charge
+            "discharge_blocked": len(dis_caps) == 0,
         }
 
 
@@ -138,8 +151,17 @@ class Aggregator:
 # ---------------------------------------------------------------------------
 def compute_limits(va, e):
     """va = virtual battery dict, e = emulator config. Returns a limits dict."""
+    # True extremes across every pack -> used for the HARD safety cutoffs and for
+    # what we report to the inverter.
     cmax, cmin = va["cell_max_mv"], va["cell_min_mv"]
     tmax, tmin = va["temp_max"], va["temp_min"]
+    # The current TAPER reads the worst cell among packs that are STILL charging /
+    # discharging. A pack that has topped out (its BMS opened the charge FET) no longer
+    # drags the whole bank's charge current down, so packs that are still low keep
+    # receiving current until they finish too. Fall back to the global extreme if
+    # capability data is unavailable (older payloads / self-test).
+    cmax_chg = va.get("cell_max_chg_mv") or cmax
+    cmin_dis = va.get("cell_min_dis_mv") or cmin
 
     def taper(x, x0, x1, y0, y1):
         if x <= min(x0, x1):
@@ -149,14 +171,15 @@ def compute_limits(va, e):
         return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
     # Charge current: full until taper_start, ramp to ccl_min by taper_end
-    ccl = taper(cmax, e["cell_chg_taper_start_mv"], e["cell_chg_taper_end_mv"],
+    ccl = taper(cmax_chg, e["cell_chg_taper_start_mv"], e["cell_chg_taper_end_mv"],
                 e["ccl_max_amps"], e["ccl_min_amps"])
     # Discharge current: full until dis_taper_start (falling), ramp down to dcl_min
-    dcl = taper(cmin, e["cell_dis_taper_start_mv"], e["cell_dis_taper_end_mv"],
+    dcl = taper(cmin_dis, e["cell_dis_taper_start_mv"], e["cell_dis_taper_end_mv"],
                 e["dcl_max_amps"], e["dcl_min_amps"])
 
     charge_ok = True
     discharge_ok = True
+    # Hard safety backstops act on the TRUE worst cell / temp across all packs.
     if cmax >= e["cell_overvolt_mv"]:
         charge_ok = False
     if cmin <= e["cell_undervolt_mv"]:
@@ -165,9 +188,12 @@ def compute_limits(va, e):
         charge_ok = False
     if not (e["discharge_temp_min_c"] <= tmin and tmax <= e["discharge_temp_max_c"]):
         discharge_ok = False
-    if va["any_problem"] or va["charge_blocked"]:
+    # Stop the BANK only when NO pack can take charge anymore (every charge FET open).
+    # A single pack finishing no longer vetoes the rest -- each BMS manages its own pack.
+    # (A per-pack `problem` is surfaced as an alarm in info_62, not a bank-wide halt.)
+    if va["charge_blocked"]:
         charge_ok = False
-    if va["any_problem"] or va["discharge_blocked"]:
+    if va["discharge_blocked"]:
         discharge_ok = False
 
     if not charge_ok:
@@ -296,11 +322,11 @@ def run(cfg):
             if va:
                 lim = compute_limits(va, e)
                 LOG.info("virtual: %.2fV %.1fA SOC%d%% cell %d-%dmV t%.0f-%.0fC | "
-                         "CVL %.1f CCL %.0f DCL %.0f chg=%d dis=%d (packs=%d)",
+                         "CVL %.1f CCL %.0f DCL %.0f chg=%d dis=%d (packs=%d chgcap=%d)",
                          va["voltage"], va["current"], va["soc"], va["cell_min_mv"],
                          va["cell_max_mv"], va["temp_min"], va["temp_max"], lim["cvl_v"],
                          lim["ccl_a"], lim["dcl_a"], lim["charge_enable"],
-                         lim["discharge_enable"], va["n_fresh"])
+                         lim["discharge_enable"], va["n_fresh"], va["n_charge_capable"])
             else:
                 LOG.warning("virtual: NO FRESH DATA -> would fail-safe (not respond)")
 
@@ -349,8 +375,10 @@ def selftest():
     # 2) Build a sample 0x63 with a representative virtual battery + limits.
     e = json.load(open(CONFIG_PATH))["emulator"]
     va = {"voltage": 53.2, "current": 12.5, "soc": 90, "cell_max_mv": 3360,
-          "cell_min_mv": 3300, "temp_max": 28.0, "temp_min": 25.0, "temp_avg": 26.5,
+          "cell_min_mv": 3300, "cell_max_chg_mv": 3360, "cell_min_dis_mv": 3300,
+          "temp_max": 28.0, "temp_min": 25.0, "temp_avg": 26.5,
           "cycles": 20, "remaining_ah": 720, "nominal_ah": 800, "n_fresh": 8,
+          "n_charge_capable": 8, "n_discharge_capable": 8,
           "any_problem": False, "charge_blocked": False, "discharge_blocked": False}
     lim = compute_limits(va, e)
     for cid, payload in (("61", info_61(va)), ("62", info_62(va, e)), ("63", info_63(lim))):
