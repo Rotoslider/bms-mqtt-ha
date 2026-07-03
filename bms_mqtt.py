@@ -83,6 +83,14 @@ def parse_basic(frame: bytes) -> dict:
         "fet_discharge": "ON" if fet & 0x02 else "OFF",
     }
     out["power"] = round(out["voltage"] * out["current"], 1)
+    # High-level activity from the signed pack current (JBD: + = charging). A 0.1 A
+    # deadband keeps a resting or breaker-off pack on "Idle" instead of flickering.
+    if out["current"] > 0.1:
+        out["state"] = "Charging"
+    elif out["current"] < -0.1:
+        out["state"] = "Discharging"
+    else:
+        out["state"] = "Idle"
     for i, t in enumerate(temps):
         out[f"temp_{i + 1}"] = t
     if temps:
@@ -190,9 +198,11 @@ def sensor_defs(num_cells: int):
     """Return list of (component, key, name, unit, device_class, state_class, extra)."""
     S = "measurement"
     defs = [
-        ("sensor", "voltage", "Voltage", "V", "voltage", S, {}),
-        ("sensor", "current", "Current", "A", "current", S, {}),
+        ("sensor", "voltage", "Voltage", "V", "voltage", S, {"suggested_display_precision": 2}),
+        ("sensor", "current", "Current", "A", "current", S, {"suggested_display_precision": 2}),
         ("sensor", "power", "Power", "W", "power", S, {}),
+        ("sensor", "state", "State", None, "enum", None,
+         {"icon": "mdi:battery-charging-medium", "options": ["Charging", "Discharging", "Idle"]}),
         ("sensor", "soc", "SOC", "%", "battery", S, {}),
         ("sensor", "remaining_ah", "Remaining capacity", "Ah", None, S, {"icon": "mdi:battery-50"}),
         ("sensor", "nominal_ah", "Nominal capacity", "Ah", None, None, {"icon": "mdi:battery", "entity_category": "diagnostic"}),
