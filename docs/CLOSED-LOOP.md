@@ -129,6 +129,7 @@ The `emulator` block in `config.json` (see `config.example.json`):
 | `recal_done_soc` | stop once **every** pack reports at least this |
 | `recal_entry_volts` / `recal_entry_min_amps` | only start at top-of-charge: bank voltage at least / current no more negative than these |
 | `recal_report_soc` | SOC ceiling reported during a hold, so the inverter keeps charging |
+| `recal_force_charge` | also assert the "charge immediately" bit during a hold (may pull grid power) |
 | `recal_abort_cell_mv` | abort the hold if any cell reaches this (below `cell_overvolt_mv`) |
 | `recal_timeout_minutes` / `recal_cooldown_hours` | give up after / wait between attempts |
 | `recal_state_path` | where the last attempt is persisted across restarts |
@@ -258,8 +259,13 @@ the emulator:
   re-enter charging no matter what voltage the BMS requests. So during a
   hold the emulator also sets the Pylontech **full-charge-request** bit in
   the CID63 status byte — the protocol's way for a battery to ask for a
-  balancing charge — and caps the reported SOC at `recal_report_soc` (97)
-  until every pack has reset.
+  balancing charge — and caps the reported SOC at `recal_report_soc`
+  until every pack has reset. Pick a `recal_report_soc` below your
+  inverter's re-charge threshold (the tested SRNE ignored 97). If your
+  firmware ignores the full-charge-request bit too, `recal_force_charge`
+  additionally asserts the "charge immediately" bit during holds — the
+  heaviest hammer in the protocol; note it may start a grid-assisted
+  charge depending on your charger-source-priority setting.
 
   ⚠️ The inverter's own **boost/absorption voltage setting must be at least
   `recal_cvl_volts`** — many inverters clamp the BMS-requested CVL to their

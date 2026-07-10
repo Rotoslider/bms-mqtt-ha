@@ -186,8 +186,9 @@ class RecalController:
         self.abort_cell_mv = e.get("recal_abort_cell_mv", 3580)
         # SOC ceiling reported while a hold is active: an inverter that has
         # latched "battery full" at SOC 100 never re-enters a charge stage,
-        # no matter what CVL we request.
-        self.report_soc = e.get("recal_report_soc", 97)
+        # no matter what CVL we request. Must be below the inverter's own
+        # re-charge threshold (the tested SRNE ignored 97).
+        self.report_soc = e.get("recal_report_soc", 90)
         self.timeout_minutes = e.get("recal_timeout_minutes", 180)
         # Short enough that a dusk timeout re-arms before the next morning's
         # top-of-charge; the trigger condition itself keeps successes ~weekly.
@@ -315,7 +316,11 @@ def compute_limits(va, e, cvl_override=None):
         "dcl_a": max(0.0, dcl),
         "charge_enable": charge_ok,
         "discharge_enable": discharge_ok,
-        "force_charge": va["soc"] <= e["force_charge_soc"],
+        # recal_force_charge: also assert the "charge immediately" bit during a
+        # hold, for inverters that ignore the full-charge-request bit. NOTE:
+        # depending on charger-source-priority this may pull grid power.
+        "force_charge": va["soc"] <= e["force_charge_soc"] or
+                        (cvl_override is not None and e.get("recal_force_charge", False)),
         # Pylontech "request full charge" bit: how a real battery asks the
         # inverter for a balancing/top-up charge. Set for the whole recal hold.
         "full_charge_request": cvl_override is not None,
@@ -574,7 +579,12 @@ def selftest():
     lim_n = compute_limits(va, e)
     assert not lim_n["full_charge_request"]
     assert not int(info_63(lim_n)[-2:], 16) & 0x08, info_63(lim_n)
-    print("full-charge-request self-test: PASS (bit set during hold, clear otherwise)")
+    assert not lim_r["force_charge"], "force bit must stay clear unless opted in"
+    lim_f = compute_limits(va, dict(e, recal_force_charge=True), 56.8)
+    assert lim_f["force_charge"] and int(info_63(lim_f)[-2:], 16) & 0x20, info_63(lim_f)
+    assert not compute_limits(va, dict(e, recal_force_charge=True))["force_charge"], \
+        "force bit must clear once the hold ends"
+    print("full-charge-request self-test: PASS (bits set during hold, clear otherwise)")
 
 
 def main():
