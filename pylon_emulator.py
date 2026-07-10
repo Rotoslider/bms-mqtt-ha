@@ -184,6 +184,10 @@ class RecalController:
         self.entry_volts = e.get("recal_entry_volts", 54.8)
         self.entry_min_amps = e.get("recal_entry_min_amps", -1.0)
         self.abort_cell_mv = e.get("recal_abort_cell_mv", 3580)
+        # SOC ceiling reported while a hold is active: an inverter that has
+        # latched "battery full" at SOC 100 never re-enters a charge stage,
+        # no matter what CVL we request.
+        self.report_soc = e.get("recal_report_soc", 97)
         self.timeout_minutes = e.get("recal_timeout_minutes", 180)
         # Short enough that a dusk timeout re-arms before the next morning's
         # top-of-charge; the trigger condition itself keeps successes ~weekly.
@@ -312,6 +316,9 @@ def compute_limits(va, e, cvl_override=None):
         "charge_enable": charge_ok,
         "discharge_enable": discharge_ok,
         "force_charge": va["soc"] <= e["force_charge_soc"],
+        # Pylontech "request full charge" bit: how a real battery asks the
+        # inverter for a balancing/top-up charge. Set for the whole recal hold.
+        "full_charge_request": cvl_override is not None,
     }
 
 
@@ -364,6 +371,8 @@ def info_63(lim):
         status |= (1 << 6)
     if lim["force_charge"]:
         status |= (1 << 5)
+    if lim.get("full_charge_request"):
+        status |= (1 << 3)
     return (u16(lim["cvl_v"] * 1000) + u16(lim["dvl_v"] * 1000) +
             u16(lim["ccl_a"] * 10) + u16(lim["dcl_a"] * 10) + u8(status))
 
@@ -426,7 +435,10 @@ def run(cfg):
             last_summary = now
             va = agg.virtual()
             if va:
-                lim = compute_limits(va, e, recal.evaluate(va))
+                cvl_over = recal.evaluate(va)
+                soc_reported = min(va["soc"], recal.report_soc) \
+                    if cvl_over is not None else va["soc"]
+                lim = compute_limits(va, e, cvl_over)
                 LOG.info("virtual: %.2fV %.1fA SOC%d%% (mean%d min%d) cell %d-%dmV "
                          "t%.0f-%.0fC | CVL %.1f CCL %.0f DCL %.0f chg=%d dis=%d "
                          "(packs=%d chgcap=%d) recal=%s",
@@ -439,7 +451,8 @@ def run(cfg):
                 # NOTE: topic must NOT match the {base}/+/state subscription above,
                 # or the emulator ingests its own summary as a phantom pack.
                 cli.publish(f"{base}/emulator/status", json.dumps({
-                    "soc": va["soc"], "soc_mean": va["soc_mean"],
+                    "soc": va["soc"], "soc_reported": soc_reported,
+                    "soc_mean": va["soc_mean"],
                     "soc_min": va["soc_min"], "voltage": round(va["voltage"], 2),
                     "current": round(va["current"], 1), "cvl_v": lim["cvl_v"],
                     "ccl_a": round(lim["ccl_a"]), "dcl_a": round(lim["dcl_a"]),
@@ -466,7 +479,10 @@ def handle_frame(frame, ser, agg, e, listen_only, recal):
     if va is None:
         LOG.warning("  no fresh battery data -> NOT responding (fail-safe)")
         return
-    lim = compute_limits(va, e, recal.evaluate(va))
+    cvl_over = recal.evaluate(va)
+    if cvl_over is not None:
+        va = dict(va, soc=min(va["soc"], recal.report_soc))
+    lim = compute_limits(va, e, cvl_over)
     if cid2 == "61":
         resp = build_response(info_61(va))
     elif cid2 == "62":
@@ -549,6 +565,16 @@ def selftest():
     assert rc5.evaluate(dict(top, current=-8.0)) is None, "discharging must not start"
     assert RecalController(dict(er, recal_enable=False)).evaluate(top) is None
     print("recal state-machine self-test: PASS (start/success/cooldown/abort/timeout)")
+
+    # 5) During a hold: CID63 carries the raised CVL + the full-charge-request
+    #    bit (0x08), so an inverter latched at "battery full" re-enters charging.
+    lim_r = compute_limits(va, e, 56.8)
+    assert lim_r["cvl_v"] == 56.8 and lim_r["full_charge_request"]
+    assert int(info_63(lim_r)[-2:], 16) & 0x08, info_63(lim_r)
+    lim_n = compute_limits(va, e)
+    assert not lim_n["full_charge_request"]
+    assert not int(info_63(lim_n)[-2:], 16) & 0x08, info_63(lim_n)
+    print("full-charge-request self-test: PASS (bit set during hold, clear otherwise)")
 
 
 def main():

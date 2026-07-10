@@ -128,6 +128,7 @@ The `emulator` block in `config.json` (see `config.example.json`):
 | `recal_trigger_soc` | start once any pack's SOC has drifted to/below this |
 | `recal_done_soc` | stop once **every** pack reports at least this |
 | `recal_entry_volts` / `recal_entry_min_amps` | only start at top-of-charge: bank voltage at least / current no more negative than these |
+| `recal_report_soc` | SOC ceiling reported during a hold, so the inverter keeps charging |
 | `recal_abort_cell_mv` | abort the hold if any cell reaches this (below `cell_overvolt_mv`) |
 | `recal_timeout_minutes` / `recal_cooldown_hours` | give up after / wait between attempts |
 | `recal_state_path` | where the last attempt is persisted across restarts |
@@ -251,6 +252,14 @@ the emulator:
   `cell_overvolt_mv` stop), a timeout, a cooldown between attempts, and all
   the normal taper/temperature limits stay active. The per-pack FET gating
   means a pack that finishes early just drops out of the charge set.
+
+  Raising CVL alone is not enough: an inverter that has latched "battery
+  full" (it saw SOC 100, or finished its own boost→float stage) won't
+  re-enter charging no matter what voltage the BMS requests. So during a
+  hold the emulator also sets the Pylontech **full-charge-request** bit in
+  the CID63 status byte — the protocol's way for a battery to ask for a
+  balancing charge — and caps the reported SOC at `recal_report_soc` (97)
+  until every pack has reset.
 
   ⚠️ The inverter's own **boost/absorption voltage setting must be at least
   `recal_cvl_volts`** — many inverters clamp the BMS-requested CVL to their

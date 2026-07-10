@@ -55,6 +55,7 @@
     "recal_done_soc": 99,
     "recal_entry_volts": 54.8,
     "recal_entry_min_amps": -1.0,
+    "recal_report_soc": 97,
     "recal_abort_cell_mv": 3580,
     "recal_timeout_minutes": 180,
     "recal_cooldown_hours": 12,
