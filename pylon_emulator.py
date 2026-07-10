@@ -16,6 +16,8 @@ SAFETY:
     raises a BMS-comms fault and halts charge/discharge rather than acting on stale data.
   * Charge/discharge limits are derived conservatively from the WORST cell and worst
     temperature across all packs. Review the thresholds in config.json["emulator"].
+  * Optional SOC recalibration (recal_enable) periodically raises CVL so every
+    pack's coulomb counter re-zeros at true full — see docs/CLOSED-LOOP.md §11.
 
 Run:
   python3 pylon_emulator.py --selftest      # validate codec, print sample frames, no serial
@@ -126,7 +128,13 @@ class Aggregator:
         return {
             "voltage": sum(v) / len(v),
             "current": sum(cur),                      # parallel banks add
-            "soc": round(sum(soc) / len(soc)),
+            # Parallel packs sit on one bus, so their TRUE SOC is identical.
+            # Coulomb counters only drift DOWN between full-charge resets, so the
+            # highest (least-drifted) counter is the honest bank estimate; the
+            # mean drags in every stale counter and decays over time.
+            "soc": max(soc),
+            "soc_mean": round(sum(soc) / len(soc)),
+            "soc_min": min(soc),
             "cell_max_mv": max(cmax),                 # true worst cell across ALL packs
             "cell_min_mv": min(cmin),                 #   (reported to inverter + hard safety)
             "cell_max_chg_mv": worst(chg_caps, "cell_max_mv", max),  # worst cell still charging
@@ -147,10 +155,103 @@ class Aggregator:
 
 
 # ---------------------------------------------------------------------------
+# SOC recalibration: periodic elevated absorption so every pack's coulomb
+# counter re-zeros.
+# ---------------------------------------------------------------------------
+class RecalController:
+    """JBD coulomb counters re-zero (SOC := 100) only when the BMS sees its
+    full-charge condition: max cell at/above its 'cell full voltage' with the
+    charge current tapered off. The everyday CVL (55.2 V = 3.45 V/cell) never
+    reaches that, so each counter ratchets down a little every cycle and the
+    reported SOC decays even though the bank is physically full.
+
+    Fix: when any pack's counter has drifted below `recal_trigger_soc` and the
+    bank is already sitting at the top of charge, raise CVL to
+    `recal_cvl_volts` and hold until every pack's BMS snaps back to full
+    (watched live via each pack's reported SOC), then drop back to normal.
+    Guardrails: abort if the highest cell reaches `recal_abort_cell_mv`
+    (below the `cell_overvolt_mv` hard stop), give up after
+    `recal_timeout_minutes`, and never attempt more than once per
+    `recal_cooldown_hours`. The result of the last attempt is persisted so a
+    service restart doesn't retrigger immediately.
+    """
+
+    def __init__(self, e):
+        self.enabled = bool(e.get("recal_enable", False))
+        self.cvl = float(e.get("recal_cvl_volts", 56.8))
+        self.trigger_soc = e.get("recal_trigger_soc", 97)
+        self.done_soc = e.get("recal_done_soc", 99)
+        self.entry_volts = e.get("recal_entry_volts", 54.8)
+        self.entry_min_amps = e.get("recal_entry_min_amps", -1.0)
+        self.abort_cell_mv = e.get("recal_abort_cell_mv", 3580)
+        self.timeout_minutes = e.get("recal_timeout_minutes", 180)
+        self.cooldown_hours = e.get("recal_cooldown_hours", 20)
+        self.state_path = e.get("recal_state_path", "/opt/bms-mqtt/recal_state.json")
+        self.active = False
+        self.active_since = 0.0                       # monotonic
+        try:
+            with open(self.state_path) as f:
+                self.state = json.load(f)             # last_attempt / last_result
+        except Exception:
+            self.state = {}
+
+    def _finish(self, result):
+        LOG.warning("RECAL %s after %.0f min -> CVL back to normal",
+                    result, (time.monotonic() - self.active_since) / 60)
+        self.active = False
+        self.state = {"last_attempt": time.time(), "last_result": result}
+        try:
+            with open(self.state_path, "w") as f:
+                json.dump(self.state, f)
+        except Exception as ex:
+            LOG.warning("recal: cannot persist state to %s: %s", self.state_path, ex)
+
+    def evaluate(self, va):
+        """Advance the state machine. Returns the CVL override while a
+        recalibration hold is active, else None (use the normal CVL)."""
+        if not self.enabled:
+            return None
+        if self.active:
+            if va["cell_max_mv"] >= self.abort_cell_mv:
+                self._finish("ABORT (cell %d mV)" % va["cell_max_mv"])
+            elif va["soc_min"] >= self.done_soc:
+                self._finish("SUCCESS (every pack >= %d%%)" % self.done_soc)
+            elif time.monotonic() - self.active_since > self.timeout_minutes * 60:
+                self._finish("TIMEOUT (packs still below %d%%)" % self.done_soc)
+            else:
+                return self.cvl
+            return None
+        # Idle: start only when a counter has drifted AND the bank is already at
+        # the top of charge (voltage near CVL, not actively discharging) AND the
+        # cooldown since the previous attempt has passed.
+        if va["soc_min"] > self.trigger_soc:
+            return None
+        if time.time() - self.state.get("last_attempt", 0) < self.cooldown_hours * 3600:
+            return None
+        if va["voltage"] < self.entry_volts or va["current"] < self.entry_min_amps:
+            return None
+        self.active = True
+        self.active_since = time.monotonic()
+        LOG.warning("RECAL START: CVL -> %.1f V until every pack SOC >= %d%% "
+                    "(min now %d%%); abort at cell %d mV, timeout %d min",
+                    self.cvl, self.done_soc, va["soc_min"],
+                    self.abort_cell_mv, self.timeout_minutes)
+        return self.cvl
+
+    def status(self):
+        if not self.enabled:
+            return "off"
+        if self.active:
+            return "ACTIVE %dmin" % ((time.monotonic() - self.active_since) / 60)
+        return "idle (last: %s)" % self.state.get("last_result", "never run")
+
+
+# ---------------------------------------------------------------------------
 # The "brain": derive conservative limits from the worst cell / temp
 # ---------------------------------------------------------------------------
-def compute_limits(va, e):
-    """va = virtual battery dict, e = emulator config. Returns a limits dict."""
+def compute_limits(va, e, cvl_override=None):
+    """va = virtual battery dict, e = emulator config. Returns a limits dict.
+    cvl_override (from RecalController) replaces cvl_volts during a recal hold."""
     # True extremes across every pack -> used for the HARD safety cutoffs and for
     # what we report to the inverter.
     cmax, cmin = va["cell_max_mv"], va["cell_min_mv"]
@@ -202,7 +303,7 @@ def compute_limits(va, e):
         dcl = 0.0
 
     return {
-        "cvl_v": e["cvl_volts"],
+        "cvl_v": cvl_override if cvl_override is not None else e["cvl_volts"],
         "dvl_v": e["dvl_volts"],
         "ccl_a": max(0.0, ccl),
         "dcl_a": max(0.0, dcl),
@@ -272,6 +373,7 @@ def run(cfg):
     import serial
     e = cfg["emulator"]
     agg = Aggregator(e)
+    recal = RecalController(e)
 
     # MQTT: subscribe to per-pack state
     base = cfg["mqtt"]["base_topic"]
@@ -312,7 +414,7 @@ def run(cfg):
                 elif buf:
                     buf.append(byte)
                     if byte == EOI:
-                        handle_frame(bytes(buf), ser, agg, e, listen_only)
+                        handle_frame(bytes(buf), ser, agg, e, listen_only, recal)
                         buf.clear()
         # periodic state summary
         now = time.monotonic()
@@ -320,18 +422,30 @@ def run(cfg):
             last_summary = now
             va = agg.virtual()
             if va:
-                lim = compute_limits(va, e)
-                LOG.info("virtual: %.2fV %.1fA SOC%d%% cell %d-%dmV t%.0f-%.0fC | "
-                         "CVL %.1f CCL %.0f DCL %.0f chg=%d dis=%d (packs=%d chgcap=%d)",
-                         va["voltage"], va["current"], va["soc"], va["cell_min_mv"],
-                         va["cell_max_mv"], va["temp_min"], va["temp_max"], lim["cvl_v"],
+                lim = compute_limits(va, e, recal.evaluate(va))
+                LOG.info("virtual: %.2fV %.1fA SOC%d%% (mean%d min%d) cell %d-%dmV "
+                         "t%.0f-%.0fC | CVL %.1f CCL %.0f DCL %.0f chg=%d dis=%d "
+                         "(packs=%d chgcap=%d) recal=%s",
+                         va["voltage"], va["current"], va["soc"], va["soc_mean"],
+                         va["soc_min"], va["cell_min_mv"], va["cell_max_mv"],
+                         va["temp_min"], va["temp_max"], lim["cvl_v"],
                          lim["ccl_a"], lim["dcl_a"], lim["charge_enable"],
-                         lim["discharge_enable"], va["n_fresh"], va["n_charge_capable"])
+                         lim["discharge_enable"], va["n_fresh"],
+                         va["n_charge_capable"], recal.status())
+                cli.publish(f"{base}/emulator/state", json.dumps({
+                    "soc": va["soc"], "soc_mean": va["soc_mean"],
+                    "soc_min": va["soc_min"], "voltage": round(va["voltage"], 2),
+                    "current": round(va["current"], 1), "cvl_v": lim["cvl_v"],
+                    "ccl_a": round(lim["ccl_a"]), "dcl_a": round(lim["dcl_a"]),
+                    "n_fresh": va["n_fresh"],
+                    "n_charge_capable": va["n_charge_capable"],
+                    "recal": recal.status(),
+                }), retain=True)
             else:
                 LOG.warning("virtual: NO FRESH DATA -> would fail-safe (not respond)")
 
 
-def handle_frame(frame, ser, agg, e, listen_only):
+def handle_frame(frame, ser, agg, e, listen_only, recal):
     d = decode_frame(frame)
     cid2 = d.get("cid2", "??")
     LOG.info("RX %s cid2=%s valid=%s", d["raw"].strip(), cid2, d.get("valid"))
@@ -346,7 +460,7 @@ def handle_frame(frame, ser, agg, e, listen_only):
     if va is None:
         LOG.warning("  no fresh battery data -> NOT responding (fail-safe)")
         return
-    lim = compute_limits(va, e)
+    lim = compute_limits(va, e, recal.evaluate(va))
     if cid2 == "61":
         resp = build_response(info_61(va))
     elif cid2 == "62":
@@ -374,7 +488,8 @@ def selftest():
 
     # 2) Build a sample 0x63 with a representative virtual battery + limits.
     e = json.load(open(CONFIG_PATH))["emulator"]
-    va = {"voltage": 53.2, "current": 12.5, "soc": 90, "cell_max_mv": 3360,
+    va = {"voltage": 53.2, "current": 12.5, "soc": 90, "soc_mean": 88, "soc_min": 80,
+          "cell_max_mv": 3360,
           "cell_min_mv": 3300, "cell_max_chg_mv": 3360, "cell_min_dis_mv": 3300,
           "temp_max": 28.0, "temp_min": 25.0, "temp_avg": 26.5,
           "cycles": 20, "remaining_ah": 720, "nominal_ah": 800, "n_fresh": 8,
@@ -389,6 +504,45 @@ def selftest():
     print(f"sample limits: CVL={lim['cvl_v']}V CCL={lim['ccl_a']}A DCL={lim['dcl_a']}A "
           f"chg={lim['charge_enable']} dis={lim['discharge_enable']}")
     print("frame round-trip self-test: PASS")
+
+    # 3) SOC aggregation: the reported SOC must be the LEAST-drifted counter.
+    agg = Aggregator({"freshness_seconds": 300, "min_fresh_batteries": 1})
+    for i, s in enumerate([65, 73, 77, 93, 99, 99, 99, 99]):
+        agg.update(f"p{i}", {"voltage": 55.0, "current": 0.0, "soc": s,
+                             "cell_max_mv": 3440, "cell_min_mv": 3430,
+                             "temp_max": 28.0, "temp_min": 25.0,
+                             "fet_charge": "ON", "fet_discharge": "ON"})
+    v = agg.virtual()
+    assert v["soc"] == 99 and v["soc_mean"] == 88 and v["soc_min"] == 65, v
+    print("SOC aggregation self-test: PASS (soc=max=99, mean=88, min=65)")
+
+    # 4) Recal state machine: start -> success -> cooldown -> abort -> timeout.
+    import tempfile
+    spath = os.path.join(tempfile.gettempdir(), "recal-selftest.json")
+    if os.path.exists(spath):
+        os.unlink(spath)
+    er = dict(e, recal_enable=True, recal_state_path=spath)
+    top = dict(v, voltage=55.0, current=0.0)
+    rc = RecalController(er)
+    assert rc.evaluate(top) == er.get("recal_cvl_volts", 56.8), "should start"
+    assert rc.evaluate(dict(top, soc_min=99)) is None and not rc.active, "should succeed"
+    rc2 = RecalController(er)                      # state persisted -> cooldown blocks
+    assert rc2.evaluate(top) is None and not rc2.active, "cooldown should block"
+    os.unlink(spath)
+    rc3 = RecalController(er)
+    assert rc3.evaluate(top) is not None, "should start again"
+    assert rc3.evaluate(dict(top, cell_max_mv=3590)) is None and not rc3.active, "should abort"
+    os.unlink(spath)
+    rc4 = RecalController(er)
+    assert rc4.evaluate(top) is not None
+    rc4.active_since -= er.get("recal_timeout_minutes", 180) * 60 + 1
+    assert rc4.evaluate(top) is None and not rc4.active, "should time out"
+    assert rc4.evaluate(dict(top, voltage=54.0)) is None, "low volts must not start"
+    os.unlink(spath)
+    rc5 = RecalController(er)
+    assert rc5.evaluate(dict(top, current=-8.0)) is None, "discharging must not start"
+    assert RecalController(dict(er, recal_enable=False)).evaluate(top) is None
+    print("recal state-machine self-test: PASS (start/success/cooldown/abort/timeout)")
 
 
 def main():

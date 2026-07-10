@@ -28,7 +28,7 @@ Each poll, it aggregates the fresh packs into one virtual battery:
 |---|---|
 | Pack voltage | **average** of all packs (they're in parallel ≈ same voltage) |
 | Pack current | **sum** of all packs (total bank current) |
-| State of charge | **average** of the packs' BMS SOC |
+| State of charge | **highest** of the packs' BMS SOC (see §11 — parallel packs share one true SOC; counters only drift *down*, so the least-drifted counter is the honest one) |
 | Highest / lowest cell | the **worst** cell across *every* pack |
 | Highest / lowest temp | the **worst** temperature across every pack |
 
@@ -123,6 +123,14 @@ The `emulator` block in `config.json` (see `config.example.json`):
 | `charge_temp_min_c` / `_max_c` | temperature window charging is allowed in |
 | `discharge_temp_min_c` / `_max_c` | temperature window discharging is allowed in |
 | `force_charge_soc` | SOC under which to request a charge regardless |
+| `recal_enable` | turn on periodic SOC recalibration (see §11; default **off**) |
+| `recal_cvl_volts` | elevated CVL held during a recalibration (3.55 V/cell) |
+| `recal_trigger_soc` | start once any pack's SOC has drifted to/below this |
+| `recal_done_soc` | stop once **every** pack reports at least this |
+| `recal_entry_volts` / `recal_entry_min_amps` | only start at top-of-charge: bank voltage at least / current no more negative than these |
+| `recal_abort_cell_mv` | abort the hold if any cell reaches this (below `cell_overvolt_mv`) |
+| `recal_timeout_minutes` / `recal_cooldown_hours` | give up after / wait between attempts |
+| `recal_state_path` | where the last attempt is persisted across restarts |
 
 > The shipped values are the tested **Vatrer** numbers: charge stops at
 > 3.60 V/cell and tapers 3.48→3.55 V — comfortably below that pack's 3.65 V
@@ -213,13 +221,46 @@ sudo systemctl enable bms-emulator
 
 ---
 
-## 11. State of charge & the shunt question
+## 11. State of charge: drift, and the built-in recalibration
 
-SOC now comes from the packs' BMS coulomb counters (averaged), which is a big
-step up from voltage guessing — but those counters only stay honest if the bank
-charges **all the way full** now and then to re-zero. If you ever see SOC drift,
-add a bank-level shunt (e.g. a Victron SmartShunt) for one authoritative number.
-For a balanced bank that regularly hits full, the BMS average is usually plenty.
+SOC comes from the packs' BMS coulomb counters — a big step up from voltage
+guessing, but counters lose a little every cycle (current-sensor offset +
+charge inefficiency) and only re-zero when the BMS sees a genuine
+**full-charge event**: max cell at/above the BMS's own "full voltage" setpoint
+with the current tapered off. At an everyday CVL of 3.45 V/cell that event
+never fires, so each counter ratchets *down* ~1–2 % per cycle, forever.
+
+Seen on the tested rig: eight packs resting at identical cell voltages
+(physically the same, essentially full) while their counters read 65–99 % —
+in perfect inverse correlation with cycle count. Two consequences baked into
+the emulator:
+
+- **Reported SOC is the *highest* pack counter, not the mean.** Parallel packs
+  share one bus, hence one true SOC; drift is strictly downward, so the
+  least-drifted counter is the best estimate. The mean just decays. (The mean
+  and min are still logged and published on `<base>/emulator/state` — a wide
+  mean-vs-max gap is your "recalibration overdue" signal.)
+- **Optional automatic recalibration** (`recal_enable`). You cannot charge a
+  drifted counter back up — the "missing" amp-hours don't physically exist and
+  a full pack accepts ~0 A. The only fix is triggering each BMS's own reset.
+  When any pack drifts below `recal_trigger_soc` and the bank is already at
+  the top of charge, the emulator raises CVL to `recal_cvl_volts`
+  (3.55 V/cell on the tested pack) and holds until **every** pack's BMS snaps
+  back to full — each reset is visible live as that pack's SOC jumps to 100.
+  Guardrails: abort at `recal_abort_cell_mv` (below the hard
+  `cell_overvolt_mv` stop), a timeout, a cooldown between attempts, and all
+  the normal taper/temperature limits stay active. The per-pack FET gating
+  means a pack that finishes early just drops out of the charge set.
+
+  ⚠️ The inverter's own **boost/absorption voltage setting must be at least
+  `recal_cvl_volts`** — many inverters clamp the BMS-requested CVL to their
+  internal setting. Set boost/absorption to the pack's *datasheet* charge
+  voltage (57.6 V for the tested Vatrer), keep float at the everyday CVL
+  (55.2 V), and let the emulator's CVL be the day-to-day governor.
+
+If you'd rather not hold cells at 3.55 V, the alternative is a bank-level
+shunt (e.g. a Victron SmartShunt) for one authoritative number — but the
+packs' own displays will still drift without an occasional true full charge.
 
 ---
 

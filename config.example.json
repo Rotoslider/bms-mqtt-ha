@@ -47,7 +47,18 @@
     "charge_temp_max_c": 50,
     "discharge_temp_min_c": -10,
     "discharge_temp_max_c": 55,
-    "force_charge_soc": 5
+    "force_charge_soc": 5,
+    "_recal_comment": "OPTIONAL SOC recalibration. BMS coulomb counters only re-zero on a full-charge event (cell at the BMS's full-voltage setpoint, current tapered); at an everyday CVL of 3.45 V/cell that never happens and reported SOC decays ~1-2% per cycle. When any pack drifts below recal_trigger_soc and the bank is already at the top of charge, the emulator raises CVL to recal_cvl_volts until every pack's BMS snaps back to 100% (or a guardrail trips). The inverter's own boost/absorption setting must be >= recal_cvl_volts or it will clamp the hold. Values below = tested Vatrer numbers (3.55 V/cell hold, abort 3.58, hard stop 3.60).",
+    "recal_enable": false,
+    "recal_cvl_volts": 56.8,
+    "recal_trigger_soc": 97,
+    "recal_done_soc": 99,
+    "recal_entry_volts": 54.8,
+    "recal_entry_min_amps": -1.0,
+    "recal_abort_cell_mv": 3580,
+    "recal_timeout_minutes": 180,
+    "recal_cooldown_hours": 20,
+    "recal_state_path": "/opt/bms-mqtt/recal_state.json"
   },
   "batteries": [
     { "mac": "AA:BB:CC:00:00:01", "name": "Battery 1", "serial": "REPLACE-ME-001" },
