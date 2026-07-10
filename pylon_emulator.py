@@ -185,7 +185,9 @@ class RecalController:
         self.entry_min_amps = e.get("recal_entry_min_amps", -1.0)
         self.abort_cell_mv = e.get("recal_abort_cell_mv", 3580)
         self.timeout_minutes = e.get("recal_timeout_minutes", 180)
-        self.cooldown_hours = e.get("recal_cooldown_hours", 20)
+        # Short enough that a dusk timeout re-arms before the next morning's
+        # top-of-charge; the trigger condition itself keeps successes ~weekly.
+        self.cooldown_hours = e.get("recal_cooldown_hours", 12)
         self.state_path = e.get("recal_state_path", "/opt/bms-mqtt/recal_state.json")
         self.active = False
         self.active_since = 0.0                       # monotonic
@@ -388,6 +390,8 @@ def run(cfg):
     def on_message(c, u, msg):
         try:
             bid = msg.topic.split("/")[1]
+            if bid == "emulator":     # our own status publish, not a pack
+                return
             agg.update(bid, json.loads(msg.payload))
         except Exception as ex:
             LOG.debug("bad msg on %s: %s", msg.topic, ex)
@@ -432,7 +436,9 @@ def run(cfg):
                          lim["ccl_a"], lim["dcl_a"], lim["charge_enable"],
                          lim["discharge_enable"], va["n_fresh"],
                          va["n_charge_capable"], recal.status())
-                cli.publish(f"{base}/emulator/state", json.dumps({
+                # NOTE: topic must NOT match the {base}/+/state subscription above,
+                # or the emulator ingests its own summary as a phantom pack.
+                cli.publish(f"{base}/emulator/status", json.dumps({
                     "soc": va["soc"], "soc_mean": va["soc_mean"],
                     "soc_min": va["soc_min"], "voltage": round(va["voltage"], 2),
                     "current": round(va["current"], 1), "cvl_v": lim["cvl_v"],

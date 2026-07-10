@@ -238,7 +238,7 @@ the emulator:
 - **Reported SOC is the *highest* pack counter, not the mean.** Parallel packs
   share one bus, hence one true SOC; drift is strictly downward, so the
   least-drifted counter is the best estimate. The mean just decays. (The mean
-  and min are still logged and published on `<base>/emulator/state` — a wide
+  and min are still logged and published on `<base>/emulator/status` — a wide
   mean-vs-max gap is your "recalibration overdue" signal.)
 - **Optional automatic recalibration** (`recal_enable`). You cannot charge a
   drifted counter back up — the "missing" amp-hours don't physically exist and

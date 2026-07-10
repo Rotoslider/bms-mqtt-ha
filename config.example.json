@@ -57,7 +57,7 @@
     "recal_entry_min_amps": -1.0,
     "recal_abort_cell_mv": 3580,
     "recal_timeout_minutes": 180,
-    "recal_cooldown_hours": 20,
+    "recal_cooldown_hours": 12,
     "recal_state_path": "/opt/bms-mqtt/recal_state.json"
   },
   "batteries": [
