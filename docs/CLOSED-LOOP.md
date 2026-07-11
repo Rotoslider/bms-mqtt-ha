@@ -237,11 +237,43 @@ Seen on the tested rig: eight packs resting at identical cell voltages
 in perfect inverse correlation with cycle count. Two consequences baked into
 the emulator:
 
-- **Reported SOC is the *highest* pack counter, not the mean.** Parallel packs
-  share one bus, hence one true SOC; drift is strictly downward, so the
-  least-drifted counter is the best estimate. The mean just decays. (The mean
-  and min are still logged and published on `<base>/emulator/status` — a wide
-  mean-vs-max gap is your "recalibration overdue" signal.)
+- **Reported SOC is the bank-level coulomb aggregate**:
+  `sum(remaining_ah) / sum(nominal_ah)` across the fresh packs (amp-hours add
+  in parallel, so this *is* the bank's coulomb counter; it falls back to the
+  mean of the counters if a BMS doesn't report Ah). Two tempting estimators
+  are wrong: the *mean of the pack percentages* decays with counter drift,
+  and the *highest counter* — which this project used briefly — is biased to
+  the least-loaded pack during a real discharge: parallel current never splits
+  evenly, the lightest-loaded pack's counter barely moves, and the reported
+  SOC stays pinned high while the bank drains (seen live: report stuck at 98 %
+  through a full solar day of zero charging while the bank had really
+  delivered ~9 % of its Ah). Max, mean and min are still logged and published
+  on `<base>/emulator/status` — a wide min-vs-max gap is your "recalibration
+  overdue" signal.
+- **Un-latch guard** (`unlatch_enable`, on by default). An inverter that has
+  latched "battery full" (it saw SOC 100) may gate recharging on the
+  *reported SOC alone* — the tested SRNE ignores even its own
+  charge-recovery-voltage setting while the BMS keeps reporting a high SOC.
+  So whenever the bank voltage is below `unlatch_volts` (set it to your
+  inverter's charge-recovery voltage) but the SOC that would be reported is
+  still above `unlatch_report_soc`, the report is capped at
+  `unlatch_report_soc` until the voltage recovers past
+  `unlatch_release_volts` — which only happens once charging has actually
+  resumed. Pick `unlatch_report_soc` below the inverter's re-charge threshold
+  (the tested SRNE ignored 97, accepted 90). The guard can only *lower* the
+  reported SOC, never raise it, so it always errs toward charging.
+  Two things to know:
+  - `unlatch_cooldown_hours` (default 8): an LFP plateau sags below a typical
+    recovery voltage within the first hour of evening load, so the guard
+    refuses to re-engage that soon after a top-of-charge — otherwise, with a
+    charger-source-priority that allows utility, it would grid-charge in a
+    loop all night. Net effect: the guard un-latches at dawn, not at midnight.
+  - The un-latch makes the inverter honor *your* recovery-voltage setting —
+    including its utility-assist behavior. On the tested SRNE, a recharge that
+    starts while PV is short flips the unit to Grid mode (house on grid, PV +
+    grid into the battery) until the charge stage completes. If you don't want
+    that, lower your recovery voltage / `unlatch_volts`, or restrict
+    charger-source-priority to solar.
 - **Optional automatic recalibration** (`recal_enable`). You cannot charge a
   drifted counter back up — the "missing" amp-hours don't physically exist and
   a full pack accepts ~0 A. The only fix is triggering each BMS's own reset.

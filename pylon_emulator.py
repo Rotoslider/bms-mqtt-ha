@@ -18,6 +18,10 @@ SAFETY:
     temperature across all packs. Review the thresholds in config.json["emulator"].
   * Optional SOC recalibration (recal_enable) periodically raises CVL so every
     pack's coulomb counter re-zeros at true full — see docs/CLOSED-LOOP.md §11.
+  * An un-latch guard (unlatch_enable, on by default) caps the reported SOC
+    when the bank voltage says "not full", so an inverter that latched
+    "battery full" on SOC re-enters charging — it can only lower the report,
+    never raise it. See docs/CLOSED-LOOP.md §11.
 
 Run:
   python3 pylon_emulator.py --selftest      # validate codec, print sample frames, no serial
@@ -108,6 +112,22 @@ class Aggregator:
         tmax = vals("temp_max"); tmin = vals("temp_min")
         cyc = vals("cycles", 0)
         rem = vals("remaining_ah", 0); nom = vals("nominal_ah", 0)
+        # Bank SOC: amp-hours add across parallel packs, so sum(remaining) /
+        # sum(nominal) IS the bank-level coulomb counter. max(pack SOC) — used
+        # before — is biased to the LEAST-loaded pack during a real discharge:
+        # its counter barely moves, pinning the reported SOC high while the
+        # bank drains, and an inverter latched "battery full" never recharges
+        # (its own charge-recovery-voltage setting is ignored in BMS mode).
+        # Downward counter drift between full-charge events is corrected by
+        # the recalibration hold, not by the estimator.
+        ah = [(p["remaining_ah"], p["nominal_ah"]) for p in packs
+              if p.get("remaining_ah") is not None and p.get("nominal_ah")]
+        if ah:
+            soc_bank = 100.0 * sum(r for r, _ in ah) / sum(n for _, n in ah)
+        elif soc:
+            soc_bank = sum(soc) / len(soc)
+        else:
+            soc_bank = 0.0
         problems = [p.get("problem") == "ON" for p in packs]
         # Per-pack charge/discharge capability, straight from each BMS's own FET state.
         # A pack whose BMS opened its charge FET has finished or is protecting itself:
@@ -128,11 +148,8 @@ class Aggregator:
         return {
             "voltage": sum(v) / len(v),
             "current": sum(cur),                      # parallel banks add
-            # Parallel packs sit on one bus, so their TRUE SOC is identical.
-            # Coulomb counters only drift DOWN between full-charge resets, so the
-            # highest (least-drifted) counter is the honest bank estimate; the
-            # mean drags in every stale counter and decays over time.
-            "soc": max(soc),
+            "soc": max(0, min(100, int(round(soc_bank)))),
+            "soc_max": max(soc),
             "soc_mean": round(sum(soc) / len(soc)),
             "soc_min": min(soc),
             "cell_max_mv": max(cmax),                 # true worst cell across ALL packs
@@ -251,6 +268,85 @@ class RecalController:
         if self.active:
             return "ACTIVE %dmin" % ((time.monotonic() - self.active_since) / 60)
         return "idle (last: %s)" % self.state.get("last_result", "never run")
+
+
+# ---------------------------------------------------------------------------
+# Un-latch guard: make the inverter honor its own charge-recovery voltage.
+# ---------------------------------------------------------------------------
+class UnlatchGuard:
+    """Once the tested SRNE has latched "battery full" (reported SOC hit 100),
+    it stays latched on SOC alone: its own charge-recovery-voltage setting is
+    ignored while the BMS keeps reporting a high SOC (observed live: recovery
+    set to 53.2 V, bank at 53.0 V, zero charge across a full solar day at
+    reported 98%). The latch only releases when the reported SOC drops to
+    ~`unlatch_report_soc` (the tested SRNE ignored 97; 90 worked).
+
+    So: while the bank voltage says "clearly not full" (below `unlatch_volts`,
+    pick your inverter's charge-recovery setting) but the SOC we'd report is
+    still above `unlatch_report_soc`, cap the report at `unlatch_report_soc`
+    until the voltage recovers past `unlatch_release_volts` — which in
+    practice only happens once real charging has resumed. The cap can only
+    LOWER the reported SOC, i.e. it errs toward charging, never away from it.
+
+    `unlatch_cooldown_hours`: an LFP plateau sags below a typical recovery
+    voltage within the first hour of evening load, so without a cooldown the
+    guard would re-open the charge gate right after every top-of-charge —
+    and an inverter whose charger-source-priority allows utility would then
+    grid-charge in a loop all night. After the bank has been at/near the top
+    (voltage >= `unlatch_release_volts`), the guard therefore refuses to
+    re-engage for this many hours: it un-latches at dawn, not at midnight.
+    State is in-memory only — after a restart the worst case is one early
+    engage, which just starts a charge the honest SOC would soon request
+    anyway."""
+
+    def __init__(self, e):
+        self.enabled = bool(e.get("unlatch_enable", True))
+        self.engage_volts = float(e.get("unlatch_volts", 53.2))
+        self.release_volts = float(e.get("unlatch_release_volts", 54.2))
+        self.report_soc = int(e.get("unlatch_report_soc",
+                                    e.get("recal_report_soc", 90)))
+        self.cooldown_hours = float(e.get("unlatch_cooldown_hours", 8))
+        self.active = False
+        self.last_high = None      # monotonic ts the bank was last near-full
+
+    def evaluate(self, va):
+        """Returns the SOC ceiling to report, or None when inactive."""
+        if not self.enabled:
+            return None
+        if va["voltage"] >= self.release_volts:
+            self.last_high = time.monotonic()
+            if self.active:
+                LOG.warning("UNLATCH GUARD off: %.2f V >= %.2f V (charge resumed)",
+                            va["voltage"], self.release_volts)
+                self.active = False
+            return None
+        if self.active:
+            return self.report_soc
+        if va["voltage"] >= self.engage_volts or va["soc"] <= self.report_soc:
+            return None
+        if self.last_high is not None and \
+                time.monotonic() - self.last_high < self.cooldown_hours * 3600:
+            return None            # just charged; don't re-open the gate yet
+        self.active = True
+        LOG.warning("UNLATCH GUARD on: %.2f V < %.2f V but SOC %d%% -> "
+                    "report %d%% until V >= %.2f",
+                    va["voltage"], self.engage_volts, va["soc"],
+                    self.report_soc, self.release_volts)
+        return self.report_soc
+
+    def status(self):
+        if not self.enabled:
+            return "off"
+        return "CAP %d%%" % self.report_soc if self.active else "idle"
+
+
+def apply_soc_caps(va, cvl_over, recal, unlatch):
+    """Apply the reported-SOC ceilings from the un-latch guard and/or an
+    active recal hold. Returns va (a capped copy when a ceiling applies)."""
+    cap = unlatch.evaluate(va)
+    if cvl_over is not None:
+        cap = recal.report_soc if cap is None else min(cap, recal.report_soc)
+    return va if cap is None else dict(va, soc=min(va["soc"], cap))
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +486,7 @@ def run(cfg):
     e = cfg["emulator"]
     agg = Aggregator(e)
     recal = RecalController(e)
+    unlatch = UnlatchGuard(e)
 
     # MQTT: subscribe to per-pack state
     base = cfg["mqtt"]["base_topic"]
@@ -432,7 +529,7 @@ def run(cfg):
                 elif buf:
                     buf.append(byte)
                     if byte == EOI:
-                        handle_frame(bytes(buf), ser, agg, e, listen_only, recal)
+                        handle_frame(bytes(buf), ser, agg, e, listen_only, recal, unlatch)
                         buf.clear()
         # periodic state summary
         now = time.monotonic()
@@ -441,35 +538,35 @@ def run(cfg):
             va = agg.virtual()
             if va:
                 cvl_over = recal.evaluate(va)
-                soc_reported = min(va["soc"], recal.report_soc) \
-                    if cvl_over is not None else va["soc"]
-                lim = compute_limits(va, e, cvl_over)
-                LOG.info("virtual: %.2fV %.1fA SOC%d%% (mean%d min%d) cell %d-%dmV "
-                         "t%.0f-%.0fC | CVL %.1f CCL %.0f DCL %.0f chg=%d dis=%d "
-                         "(packs=%d chgcap=%d) recal=%s",
-                         va["voltage"], va["current"], va["soc"], va["soc_mean"],
-                         va["soc_min"], va["cell_min_mv"], va["cell_max_mv"],
+                va_rep = apply_soc_caps(va, cvl_over, recal, unlatch)
+                lim = compute_limits(va_rep, e, cvl_over)
+                LOG.info("virtual: %.2fV %.1fA SOC%d%%->rep%d (max%d mean%d min%d) "
+                         "cell %d-%dmV t%.0f-%.0fC | CVL %.1f CCL %.0f DCL %.0f "
+                         "chg=%d dis=%d (packs=%d chgcap=%d) recal=%s unlatch=%s",
+                         va["voltage"], va["current"], va["soc"], va_rep["soc"],
+                         va["soc_max"], va["soc_mean"], va["soc_min"],
+                         va["cell_min_mv"], va["cell_max_mv"],
                          va["temp_min"], va["temp_max"], lim["cvl_v"],
                          lim["ccl_a"], lim["dcl_a"], lim["charge_enable"],
                          lim["discharge_enable"], va["n_fresh"],
-                         va["n_charge_capable"], recal.status())
+                         va["n_charge_capable"], recal.status(), unlatch.status())
                 # NOTE: topic must NOT match the {base}/+/state subscription above,
                 # or the emulator ingests its own summary as a phantom pack.
                 cli.publish(f"{base}/emulator/status", json.dumps({
-                    "soc": va["soc"], "soc_reported": soc_reported,
-                    "soc_mean": va["soc_mean"],
+                    "soc": va["soc"], "soc_reported": va_rep["soc"],
+                    "soc_max": va["soc_max"], "soc_mean": va["soc_mean"],
                     "soc_min": va["soc_min"], "voltage": round(va["voltage"], 2),
                     "current": round(va["current"], 1), "cvl_v": lim["cvl_v"],
                     "ccl_a": round(lim["ccl_a"]), "dcl_a": round(lim["dcl_a"]),
                     "n_fresh": va["n_fresh"],
                     "n_charge_capable": va["n_charge_capable"],
-                    "recal": recal.status(),
+                    "recal": recal.status(), "unlatch": unlatch.status(),
                 }), retain=True)
             else:
                 LOG.warning("virtual: NO FRESH DATA -> would fail-safe (not respond)")
 
 
-def handle_frame(frame, ser, agg, e, listen_only, recal):
+def handle_frame(frame, ser, agg, e, listen_only, recal, unlatch):
     d = decode_frame(frame)
     cid2 = d.get("cid2", "??")
     LOG.info("RX %s cid2=%s valid=%s", d["raw"].strip(), cid2, d.get("valid"))
@@ -485,8 +582,7 @@ def handle_frame(frame, ser, agg, e, listen_only, recal):
         LOG.warning("  no fresh battery data -> NOT responding (fail-safe)")
         return
     cvl_over = recal.evaluate(va)
-    if cvl_over is not None:
-        va = dict(va, soc=min(va["soc"], recal.report_soc))
+    va = apply_soc_caps(va, cvl_over, recal, unlatch)
     lim = compute_limits(va, e, cvl_over)
     if cid2 == "61":
         resp = build_response(info_61(va))
@@ -532,7 +628,8 @@ def selftest():
           f"chg={lim['charge_enable']} dis={lim['discharge_enable']}")
     print("frame round-trip self-test: PASS")
 
-    # 3) SOC aggregation: the reported SOC must be the LEAST-drifted counter.
+    # 3) SOC aggregation: bank SOC is the Ah-weighted coulomb aggregate
+    #    (falls back to the mean of the counters when Ah data is missing).
     agg = Aggregator({"freshness_seconds": 300, "min_fresh_batteries": 1})
     for i, s in enumerate([65, 73, 77, 93, 99, 99, 99, 99]):
         agg.update(f"p{i}", {"voltage": 55.0, "current": 0.0, "soc": s,
@@ -540,8 +637,57 @@ def selftest():
                              "temp_max": 28.0, "temp_min": 25.0,
                              "fet_charge": "ON", "fet_discharge": "ON"})
     v = agg.virtual()
-    assert v["soc"] == 99 and v["soc_mean"] == 88 and v["soc_min"] == 65, v
-    print("SOC aggregation self-test: PASS (soc=max=99, mean=88, min=65)")
+    assert v["soc"] == 88 and v["soc_max"] == 99 and v["soc_mean"] == 88 \
+        and v["soc_min"] == 65, v
+    print("SOC aggregation self-test: PASS (no Ah data -> mean fallback 88)")
+    # Regression (2026-07-11): after a real discharge, max(counter) tracks the
+    # least-loaded pack and pins the report high (98) while the bank has really
+    # delivered ~9% of its Ah -- the honest bank SOC is sum(rem)/sum(nom)=91.
+    agg2 = Aggregator({"freshness_seconds": 300, "min_fresh_batteries": 1})
+    incident = [(85, 86.08), (90, 90.94), (89, 89.95), (84, 84.88),
+                (90, 91.09), (98, 98.61), (94, 95.44), (90, 90.47)]
+    for i, (s, rem) in enumerate(incident):
+        agg2.update(f"q{i}", {"voltage": 53.17, "current": -1.5, "soc": s,
+                              "remaining_ah": rem, "nominal_ah": 100.0,
+                              "cell_max_mv": 3325, "cell_min_mv": 3320,
+                              "temp_max": 29.0, "temp_min": 27.0,
+                              "fet_charge": "ON", "fet_discharge": "ON"})
+    v2 = agg2.virtual()
+    assert v2["soc"] == 91 and v2["soc_max"] == 98 and v2["soc_min"] == 84, v2
+    print("SOC aggregation self-test: PASS (Ah aggregate 91, not max 98)")
+
+    # 3b) Un-latch guard: cap the report below the inverter's re-charge
+    #     threshold while voltage says "not full"; release only once the
+    #     voltage has recovered (i.e. charging actually resumed).
+    g = UnlatchGuard(dict(e, unlatch_volts=53.2, unlatch_release_volts=54.2,
+                          unlatch_report_soc=90))
+    assert g.evaluate({"voltage": 53.5, "soc": 98}) is None, "above engage volts"
+    assert g.evaluate({"voltage": 53.15, "soc": 98}) == 90, "should engage"
+    assert g.evaluate({"voltage": 53.9, "soc": 98}) == 90, "hysteresis holds"
+    assert g.evaluate({"voltage": 54.2, "soc": 98}) is None, "should release"
+    assert g.evaluate({"voltage": 53.15, "soc": 88}) is None, \
+        "already reporting <= cap -> no need to engage"
+    assert g.evaluate({"voltage": 53.15, "soc": 98}) is None, \
+        "cooldown right after a top-of-charge must block re-engage (else an " \
+        "evening plateau sag would grid-charge in a loop all night)"
+    g.last_high -= 8 * 3600 + 1
+    assert g.evaluate({"voltage": 53.15, "soc": 98}) == 90, \
+        "re-engages once the cooldown has expired"
+    assert UnlatchGuard(dict(e, unlatch_enable=False)).evaluate(
+        {"voltage": 50.0, "soc": 99}) is None, "disabled must never cap"
+    # the cap is a ceiling: it must never RAISE an honest low report
+    g2 = UnlatchGuard(dict(e, unlatch_report_soc=92))
+    va_low = dict(v2, voltage=52.9)
+    assert apply_soc_caps(va_low, None, RecalController(e), g2)["soc"] == 91, \
+        "guard cap 92 must not raise an honest 91"
+    # recal hold + engaged guard -> the lower of the two ceilings wins
+    g3 = UnlatchGuard(dict(e, unlatch_report_soc=92))
+    va98 = dict(v2, voltage=52.9, soc=98)
+    assert g3.evaluate(va98) == 92
+    rc_cap = RecalController(dict(e, recal_report_soc=90))
+    assert apply_soc_caps(va98, 56.8, rc_cap, g3)["soc"] == 90, \
+        "recal ceiling 90 must win over guard ceiling 92"
+    print("un-latch guard self-test: PASS (engage/hold/release/disabled/compose)")
 
     # 4) Recal state machine: start -> success -> cooldown -> abort -> timeout.
     import tempfile
@@ -573,7 +719,9 @@ def selftest():
 
     # 5) During a hold: CID63 carries the raised CVL + the full-charge-request
     #    bit (0x08), so an inverter latched at "battery full" re-enters charging.
-    lim_r = compute_limits(va, e, 56.8)
+    # pin recal_force_charge=False: the assertions test the OPT-OUT default,
+    # independent of what the local config.json chose.
+    lim_r = compute_limits(va, dict(e, recal_force_charge=False), 56.8)
     assert lim_r["cvl_v"] == 56.8 and lim_r["full_charge_request"]
     assert int(info_63(lim_r)[-2:], 16) & 0x08, info_63(lim_r)
     lim_n = compute_limits(va, e)
