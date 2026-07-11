@@ -1,0 +1,15 @@
+[Unit]
+Description=PV MPPT-trap detector -> MQTT/Home Assistant (stranded-tracker alarm)
+After=mosquitto.service
+
+[Service]
+Type=simple
+User=solar-assistant
+Group=solar-assistant
+ExecStart=/usr/bin/python3 /opt/bms-mqtt/pv_trap_monitor.py
+WorkingDirectory=/opt/bms-mqtt
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

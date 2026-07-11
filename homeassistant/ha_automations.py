@@ -9,6 +9,8 @@ Creates:
   - bms_cell_imbalance      : any pack's cell spread > DELTA_MV (default 120)
   - bms_cell_out_of_range   : any cell < CELL_MIN_MV (3000) or > CELL_MAX_MV (3650)
   - bms_battery_offline     : a pack stops reporting for OFFLINE_MIN (5) minutes
+  - bms_pv_mppt_trap        : the PV tracker stranded on the high-voltage knee
+                              (needs pv_trap_monitor.py publishing the sensor)
 
 Alerts use persistent_notification. To notify your phone instead, change the
 action service to e.g. notify.mobile_app_<your_device>.
@@ -31,6 +33,10 @@ cmax = [f"sensor.battery_{i}_cell_max" for i in N]
 volt = [f"sensor.battery_{i}_voltage" for i in N]
 
 NOTE = {"service": "persistent_notification.create"}
+# HA names the discovered entity <device>_<object_id>; override if your HA
+# version registered it differently (check Settings -> Devices -> MQTT).
+PV_TRAP_ENTITY = os.environ.get(
+    "PV_TRAP_ENTITY", "binary_sensor.pv_array_monitor_pv_mppt_trap")
 
 
 def autos():
@@ -59,6 +65,25 @@ def autos():
                 "title": "Battery cell voltage alert",
                 "message": "{{ trigger.to_state.attributes.friendly_name }} = "
                            "{{ trigger.to_state.state }} mV"}}],
+            "mode": "single"},
+        "bms_pv_mppt_trap": {
+            "alias": "PV - MPPT stuck on high-voltage knee",
+            "description": "PV tracker stranded on a false maximum after a "
+                           "cold start; array output capped at a fraction of "
+                           "available power until manually re-seated",
+            "trigger": [{"platform": "state",
+                         "entity_id": [PV_TRAP_ENTITY],
+                         "to": "on", "for": {"minutes": 1}}],
+            "action": [{**NOTE, "data": {
+                "notification_id": "pv_mppt_trap",
+                "title": "PV output stuck low — action needed",
+                "message": "The solar tracker is stranded on the high-voltage "
+                           "knee (string near open-circuit voltage, only a few "
+                           "amps in daytime). Fix: cover the two west wall "
+                           "panels for ~2 minutes, then uncover — output "
+                           "should jump to ~2 kW. A PV disconnect cycle can "
+                           "also work but may take several tries. House power "
+                           "is not affected by either."}}],
             "mode": "single"},
         "bms_battery_offline": {
             "alias": "BMS - battery offline",

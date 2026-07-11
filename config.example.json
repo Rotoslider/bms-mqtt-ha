@@ -68,6 +68,17 @@
     "recal_cooldown_hours": 12,
     "recal_state_path": "/opt/bms-mqtt/recal_state.json"
   },
+  "_pv_monitor_comment": "OPTIONAL, used only by pv_trap_monitor.py. Alarms (HA binary_sensor 'PV MPPT trap') when the inverter's tracker strands on a high-voltage local maximum — the signature of a mixed-orientation series string after a midday PV cold-start: string voltage near Voc with only a few amps, sustained through the hours the main array faces the sun. All keys optional; defaults shown. Set local_utc_offset_hours if the host clock runs UTC (e.g. -7 for Arizona); window hours are local.",
+  "pv_monitor": {
+    "sa_prefix": "solar_assistant/inverter_1",
+    "trap_volts": 240.0,
+    "trap_amps": 5.0,
+    "hold_seconds": 600,
+    "clear_seconds": 120,
+    "window_start_hour": 9,
+    "window_end_hour": 17,
+    "local_utc_offset_hours": 0
+  },
   "batteries": [
     { "mac": "AA:BB:CC:00:00:01", "name": "Battery 1", "serial": "REPLACE-ME-001" },
     { "mac": "AA:BB:CC:00:00:02", "name": "Battery 2", "serial": "REPLACE-ME-002", "manufacturer": "LiTime", "model": "12V 100Ah" }
